@@ -1,1 +1,1 @@
-from .explainer import OutlierExplainerLime
+from .explainer import OutlierExplainerLime, OutlierExplainerDlime
