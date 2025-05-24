@@ -314,7 +314,7 @@ class OutlierExplainerShap:
 
         return shap_df
 
-    def explain_all_outliers_(self, top_n=5):
+    def explain_outlier_top_features(self, top_n=5):
         rows = []
         for idx in self.outlier_indices:
             df = self.explain_outlier(int(idx), visualize=False, top_n=top_n).copy()
