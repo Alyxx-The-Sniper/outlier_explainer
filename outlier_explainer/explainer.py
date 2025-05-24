@@ -18,7 +18,7 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.linear_model import LinearRegression
 from IPython.display import display, HTML
 
-
+#### Lime Class
 class OutlierExplainerLime:
     def __init__(self, X, model_type="iso", contamination=0.1):
         self.X_raw = X.reset_index(drop=True)  # ensure clean indexing
@@ -115,8 +115,8 @@ class OutlierExplainerLime:
       else:
           raise ValueError("Only 2D and 3D visualizations are supported")
       
-################################################################################################
 
+##### Dlime Class
 class OutlierExplainerDlime:
     def __init__(self, X, model_type="iso", contamination=0.1, n_clusters=10):
         self.X_raw = X.reset_index(drop=True)
@@ -219,3 +219,140 @@ class OutlierExplainerDlime:
             plt.show()
         else:
             raise ValueError("Only 2D and 3D visualizations are supported")
+
+
+#### Shap Class
+class OutlierExplainerShap:
+    def __init__(self, method='isolation_forest', contamination=0.01, random_state=42, **kwargs):
+        supported_methods = ['isolation_forest', 'pca', 'ocsvm', 'lof']
+        assert method in supported_methods, f"Method must be one of {supported_methods}"
+
+        self.method = method
+        self.contamination = contamination
+        self.random_state = random_state
+        self.kwargs = kwargs
+
+        self.scaler = StandardScaler()
+        self.X_train = None 
+        self.X_scaled = None
+
+        self.model = None
+        self.explainer = None
+        self.pca = None
+        self.outlier_indices = None
+        self.reconstruction_errors = None
+
+    def fit(self, X):
+        self.X_train = X.copy()
+        self.X_scaled = pd.DataFrame(self.scaler.fit_transform(X), columns=X.columns)
+
+        if self.method == 'isolation_forest':
+            self.model = IsolationForest(contamination=self.contamination, random_state=self.random_state, **self.kwargs)
+            self.model.fit(self.X_scaled)
+            self.explainer = shap.Explainer(self.model, self.X_scaled)
+            preds = self.model.predict(self.X_scaled)
+            self.outlier_indices = np.where(preds == -1)[0]
+
+        elif self.method == 'pca':
+            self.pca = PCA(n_components=0.9, random_state=self.random_state)
+            X_proj = self.pca.fit_transform(self.X_scaled)
+            X_reconstructed = self.pca.inverse_transform(X_proj)
+            errors = np.mean((self.X_scaled - X_reconstructed) ** 2, axis=1)
+            threshold = np.quantile(errors, 1 - self.contamination)
+            self.reconstruction_errors = errors
+            self.outlier_indices = np.where(errors >= threshold)[0]
+
+        elif self.method == 'ocsvm':
+            self.model = OneClassSVM(**self.kwargs)
+            self.model.fit(self.X_scaled)
+            preds = self.model.predict(self.X_scaled)
+            self.outlier_indices = np.where(preds == -1)[0]
+
+        elif self.method == 'lof':
+            self.model = LocalOutlierFactor(n_neighbors=20, contamination=self.contamination, **self.kwargs)
+            preds = self.model.fit_predict(self.X_scaled)
+            self.outlier_indices = np.where(preds == -1)[0]
+
+    def detect_outliers(self):
+        return self.outlier_indices
+
+    def explain_outlier(self, index, visualize=False, top_n=None):
+        index = int(index)
+        instance_scaled = self.X_scaled.iloc[[index]]
+        original_instance = self.scaler.inverse_transform(instance_scaled)[0]
+
+        if self.method == 'isolation_forest':
+            shap_values = self.explainer(instance_scaled)
+            if visualize:
+                shap.plots.waterfall(shap_values[0])
+            shap_df = pd.DataFrame({
+                "feature": self.X_scaled.columns,
+                "shap_value": shap_values.values[0],
+                "feature_scaled_value": instance_scaled.values[0],
+                "original_value": original_instance
+            }).sort_values(by="shap_value", key=abs, ascending=False)
+
+        elif self.method == 'pca':
+            reconstruction_error = np.abs(self.X_scaled.iloc[index] - self.pca.inverse_transform(self.pca.transform(instance_scaled))[0])
+            shap_df = pd.DataFrame({
+                "feature": self.X_scaled.columns,
+                "reconstruction_error": reconstruction_error,
+                "feature_value": instance_scaled.values[0],
+                "original_value": original_instance
+            }).sort_values(by="reconstruction_error", ascending=False)
+
+        else:
+            shap_df = pd.DataFrame({
+                "feature": self.X_scaled.columns,
+                "feature_value": instance_scaled.values[0],
+                "original_value": original_instance
+            })
+
+        if top_n is not None:
+            shap_df = shap_df.head(top_n)
+
+        return shap_df
+
+    def explain_all_outliers_(self, top_n=5):
+        rows = []
+        for idx in self.outlier_indices:
+            df = self.explain_outlier(int(idx), visualize=False, top_n=top_n).copy()
+            df.insert(0, "outlier_index", idx)
+            rows.append(df)
+        return pd.concat(rows, ignore_index=True)
+
+    def score(self):
+        if self.method == 'isolation_forest':
+            return self.model.decision_function(self.X_scaled)
+        elif self.method == 'pca':
+            return -self.reconstruction_errors
+        elif self.method == 'ocsvm':
+            return -self.model.decision_function(self.X_scaled)
+
+    def visualize(self, dimension=2, method='pca'):
+        if method == 'pca':
+            reducer = PCA(n_components=dimension)
+        elif method == 'umap':
+            reducer = umap.UMAP(n_components=dimension, random_state=self.random_state)
+        else:
+            raise ValueError("Method must be 'pca' or 'umap'")
+
+        embedding = reducer.fit_transform(self.X_scaled)
+        is_outlier = np.zeros(self.X_scaled.shape[0])
+        if self.outlier_indices is not None:
+            is_outlier[self.outlier_indices] = 1
+
+        fig = plt.figure(figsize=(8, 6))
+        if dimension == 2:
+            plt.scatter(embedding[:, 0], embedding[:, 1], c=is_outlier, cmap='coolwarm', edgecolor='k')
+            plt.title(f"Outlier Visualization (2D - {method.upper()})")
+            plt.xlabel("Component 1")
+            plt.ylabel("Component 2")
+        elif dimension == 3:
+            ax = fig.add_subplot(111, projection='3d')
+            ax.scatter(embedding[:, 0], embedding[:, 1], embedding[:, 2], c=is_outlier, cmap='coolwarm')
+            ax.set_title(f"Outlier Visualization (3D - {method.upper()})")
+        else:
+            raise ValueError("Only 2D or 3D visualizations are supported")
+
+        plt.show()
